@@ -1,0 +1,6 @@
+{
+  "name": "Myanmar MV Studio",
+  "description": "Version 2.0 — AI Music Video Subtitle Generator, FFmpeg Color Grader, and Custom Brand Logo Watermark Studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
