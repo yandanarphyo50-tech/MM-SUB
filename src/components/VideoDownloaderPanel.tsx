@@ -16,7 +16,6 @@ import {
 import {
   extractFirstHttpUrl,
   getAsciiSafeMediaFilename,
-  getSessionRefreshHref,
   isEmbeddedIframe,
   isIOSDevice,
   isInAppBrowser,
@@ -40,7 +39,6 @@ interface VideoDownloaderPanelProps {
   isInspecting: boolean;
   isDownloadingLink: boolean;
   downloadError: string | null;
-  cookieAuthNeeded?: boolean;
   downloadedItems: DownloadedVideoItem[];
   savingItemId: string | null;
   savingProgress: number | null;
@@ -54,7 +52,7 @@ interface VideoDownloaderPanelProps {
 }
 
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'Direct Link';
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
@@ -68,7 +66,6 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
   isInspecting,
   isDownloadingLink,
   downloadError,
-  cookieAuthNeeded = false,
   downloadedItems,
   savingItemId,
   savingProgress,
@@ -162,7 +159,7 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
                   onDownloadFromLink();
                 }
               }}
-              placeholder="https://www.tiktok.com/... သို့မဟုတ် Video Link"
+              placeholder="Direct .mp4 / .mp3 Media Link (သို့) Video Link"
               className="w-full h-11 pl-9 pr-9 rounded-xl bg-[#090B0E] border border-zinc-800 text-xs sm:text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-sky-500/80"
             />
             {urlInput && (
@@ -311,19 +308,20 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
         </div>
       )}
 
-      {/* Error Box */}
+      {/* Error / Browser CORS Guidance Box */}
       {downloadError && (
-        <div className="px-3 py-2.5 rounded-xl bg-red-950/50 border border-red-900/70 text-xs text-red-200 space-y-1.5">
+        <div className="px-3 py-2.5 rounded-xl bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 space-y-2">
           <p className="leading-relaxed">{downloadError}</p>
           <div className="flex flex-wrap items-center gap-2">
-            {cookieAuthNeeded && typeof window !== 'undefined' && (
+            {trimmedUrl && /^https?:\/\//i.test(trimmedUrl) && !ownAppUrlPasted && (
               <a
-                href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
+                href={trimmedUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold"
+                className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold inline-flex items-center gap-1"
               >
-                Chrome Tab အသစ်တွင် ဖွင့်မည်
+                <ExternalLink className="w-3 h-3" />
+                <span>Browser ဖြင့် ဖွင့်ကြည့်မည်</span>
               </a>
             )}
             <a
@@ -353,7 +351,8 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
                 item.filename,
                 item.isAudioOnly ? '.mp3' : '.mp4'
               );
-              const directDownloadHref = `${item.downloadUrl}?download=1`;
+              const resolvedDownloadUrl = item.downloadUrl;
+              const directDownloadHref = item.downloadUrl;
 
               return (
                 <div
@@ -400,7 +399,7 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
                     <audio
                       controls
                       preload="metadata"
-                      src={item.downloadUrl}
+                      src={resolvedDownloadUrl}
                       className="w-full h-10"
                     />
                   ) : (
@@ -408,7 +407,7 @@ export const VideoDownloaderPanel: React.FC<VideoDownloaderPanelProps> = ({
                       controls
                       playsInline
                       preload="metadata"
-                      src={item.downloadUrl}
+                      src={resolvedDownloadUrl}
                       className="w-full max-h-52 rounded-lg bg-black border border-slate-800/80 object-contain"
                     />
                   )}

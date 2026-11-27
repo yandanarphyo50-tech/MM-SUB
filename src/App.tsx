@@ -14,35 +14,31 @@ import { StudioToolDeck } from './components/StudioToolDeck';
 import { ToolsGuideModal, type GuideToolTargetId } from './components/ToolsGuideModal';
 import { VideoMonitor } from './components/VideoMonitor';
 import {
-  CookieCheckError,
-  canRequestStorageAccess,
-  checkServerSessionDetailed,
-  checkServerSessionOk,
   extractFirstHttpUrl,
-  fetchAuthenticatedBlob,
-  fetchVideoBlobInChunks,
-  getAsciiSafeMp4Filename,
-  getSessionRefreshHref,
-  isEmbeddedIframe,
+  getAsciiSafeMediaFilename,
   isInAppBrowser,
-  isNetworkFetchError,
   isOwnAppUrl,
-  parseApiResponse,
-  postFormDataResilient,
-  postRawChunkResilient,
-  resilientFetch,
   triggerBlobDownload,
   triggerDirectDownload,
   triggerObjectUrlDownload,
-  tryRequestStorageAccess,
 } from './lib/api';
+import { exportVideoInBrowser } from './lib/clientCanvasExport';
+import {
+  downloadVideoLinkClient,
+  inspectVideoLinkClient,
+} from './lib/clientDownloader';
+import {
+  generateSubtitlesClient,
+  getStoredGeminiApiKey,
+  saveStoredGeminiApiKey,
+  translateSrtClient,
+} from './lib/clientGemini';
 import { prepareLogoFileForUpload } from './lib/logoMaker';
 import {
   mergeSrtCues,
   parseFlexInputTime,
   parseSrt,
   serializeSrt,
-  type SrtCue,
 } from './lib/srt';
 import {
   APP_BRAND_LOGO_URL,
@@ -68,42 +64,44 @@ import {
   type VideoFitModeId,
 } from './lib/studioTypes';
 
-const CHUNK_SIZE = 256 * 1024; // 256 KB chunks for rock-solid mobile & cellular uploads
-const UPLOAD_RETRY_DELAYS_MS = [600, 1400];
+type AppViewMode = 'hub' | 'editor' | 'downloader';
 
-function createUuid(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-}
-
-async function readBlobSliceSafely(blob: Blob): Promise<ArrayBuffer> {
+function getViewModeFromLocation(): AppViewMode {
+  if (typeof window === 'undefined') return 'hub';
   try {
-    return await blob.arrayBuffer();
+    const pathname = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+    const viewParam = new URLSearchParams(window.location.search).get('view')?.toLowerCase();
+    if (
+      pathname === '/downloader' ||
+      pathname === '/video-downloader' ||
+      viewParam === 'downloader'
+    ) {
+      return 'downloader';
+    }
+    if (
+      pathname === '/studio' ||
+      pathname === '/editor' ||
+      viewParam === 'studio' ||
+      viewParam === 'editor'
+    ) {
+      return 'editor';
+    }
   } catch {
-    throw new Error(
-      'ရွေးချယ်ထားသော ဖိုင်ကို ဖတ်မရပါ (Google Drive / Cloud ဖိုင်ဖြစ်နိုင်သည်) — ဖုန်း Internal Storage (Downloads) ထဲသို့ အရင် Save ပြီးမှ ရွေးချယ်ပေးပါ။'
-    );
+    // Ignore location parse errors
   }
+  return 'hub';
 }
 
 export default function App() {
   const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
   const [videoMeta, setVideoMeta] = useState<StudioVideoMeta | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [uploadError, setUploadError] = useState<string | null>(null);
 
-  const [viewMode, setViewMode] = useState<'hub' | 'editor' | 'downloader'>('hub');
+  const [viewMode, setViewMode] = useState<AppViewMode>(() => getViewModeFromLocation());
   const [openToolId, setOpenToolId] = useState<StudioToolId | null>('ai_subtitle');
 
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(() => getStoredGeminiApiKey());
   const [modeId, setModeId] = useState<SubtitleModeId>('english_to_burmese');
-  const [modelId, setModelId] = useState<GeminiModelId>('gemini-4-hydrogen');
+  const [modelId, setModelId] = useState<GeminiModelId>('gemini-3.5-flash-lite');
   const [translationScope, setTranslationScope] = useState<'full' | 'range'>('full');
   const [rangeStartInput, setRangeStartInput] = useState('00:00');
   const [rangeEndInput, setRangeEndInput] = useState('');
@@ -112,6 +110,7 @@ export default function App() {
   const [videoDuration, setVideoDuration] = useState(0);
   const [srtText, setSrtText] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generateProgressText, setGenerateProgressText] = useState<string | null>(null);
   const [isTranslatingSrt, setIsTranslatingSrt] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
 
@@ -154,12 +153,12 @@ export default function App() {
   const [loadingToStudioId, setLoadingToStudioId] = useState<string | null>(null);
 
   const [isRendering, setIsRendering] = useState(false);
+  const [renderProgress, setRenderProgress] = useState<number | null>(null);
   const [isDownloadingMp4, setIsDownloadingMp4] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [renderResult, setRenderResult] = useState<RenderResult | null>(null);
   const [activeMonitorTab, setActiveMonitorTab] = useState<'preview' | 'rendered'>('preview');
-  const [cookieAuthNeeded, setCookieAuthNeeded] = useState(false);
   const [copiedShareLink, setCopiedShareLink] = useState(false);
   const [showToolsGuide, setShowToolsGuide] = useState(false);
   const [showGuestShareHelp, setShowGuestShareHelp] = useState(false);
@@ -170,57 +169,34 @@ export default function App() {
   const monitorSectionRef = useRef<HTMLDivElement | null>(null);
   const toolsSectionRef = useRef<HTMLDivElement | null>(null);
   const selectedFileRef = useRef<File | null>(null);
-  const logoFileRef = useRef<File | null>(null);
   const positionGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const cues = useMemo(() => parseSrt(srtText), [srtText]);
 
+  const navigateView = useCallback((nextMode: AppViewMode) => {
+    setViewMode(nextMode);
+    if (typeof window === 'undefined') return;
+    try {
+      const targetPath =
+        nextMode === 'downloader'
+          ? '/downloader'
+          : nextMode === 'editor'
+          ? '/studio'
+          : '/';
+      if (window.location.pathname !== targetPath) {
+        window.history.pushState({ viewMode: nextMode }, '', targetPath);
+      }
+    } catch {
+      // Ignore history API restrictions
+    }
+  }, []);
+
   useEffect(() => {
-    let active = true;
-    const verifySession = async () => {
-      const detail = await checkServerSessionDetailed();
-      if (!active) return;
-      if (!detail.offline && (detail.authBlocked || !detail.sessionOk)) {
-        if (detail.authBlocked && !isEmbeddedIframe() && !isInAppBrowser()) {
-          try {
-            const lastAttempt = Number(
-              sessionStorage.getItem('mv_studio_reauth_at') || '0'
-            );
-            if (!lastAttempt || Date.now() - lastAttempt > 20_000) {
-              sessionStorage.setItem('mv_studio_reauth_at', String(Date.now()));
-              window.location.replace(`/api/session-entry?ts=${Date.now()}`);
-              return;
-            }
-          } catch {
-            // ignore sessionStorage errors
-          }
-        }
-        setCookieAuthNeeded(true);
-      } else {
-        setCookieAuthNeeded(false);
-        setUploadError((prev) =>
-          prev && prev.includes('Security Cookie') ? null : prev
-        );
-      }
+    const handlePopState = () => {
+      setViewMode(getViewModeFromLocation());
     };
-
-    void verifySession();
-
-    const handleFocus = () => {
-      void verifySession();
-    };
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void verifySession();
-      }
-    };
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      active = false;
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
   useEffect(() => {
@@ -255,140 +231,24 @@ export default function App() {
     };
   }, [renderResult?.blobUrl]);
 
-  const uploadFileToServer = useCallback(async (file: File): Promise<StudioVideoMeta> => {
-    setIsUploading(true);
-    setUploadProgress(0);
-    setUploadError(null);
-    try {
-      if (file.size === 0) {
-        throw new Error('ရွေးချယ်ထားသော ဗီဒီယိုဖိုင် အလွတ်ဖြစ်နေပါသည် (0 bytes)။');
-      }
-      const sessionDetail = await checkServerSessionDetailed();
-      if (sessionDetail.offline) {
-        throw new Error(
-          'အင်တာနက် ချိတ်ဆက်မှု ပြတ်တောက်နေပါသည်။ Wi-Fi / Mobile Data ကို စစ်ဆေးပြီး ပြန်တင်မည် နှိပ်ပါ။'
-        );
-      }
-      if (sessionDetail.authBlocked || !sessionDetail.sessionOk) {
-        throw new CookieCheckError();
-      }
-      const uploadId = createUuid();
-      const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
-      let finalMeta: StudioVideoMeta | null = null;
-
-      type ChunkResponse = {
-        done: boolean;
-        videoId?: string;
-        filename?: string;
-        sizeBytes?: number;
-        mimeType?: string;
-      };
-
-      for (let idx = 0; idx < totalChunks; idx++) {
-        const start = idx * CHUNK_SIZE;
-        const end = Math.min(file.size, start + CHUNK_SIZE);
-        const slice = file.slice(start, end);
-        // Buffer slice in RAM so mobile browsers do not fail with ERR_UPLOAD_FILE_CHANGED or Drive read errors
-        const sliceBytes = await readBlobSliceSafely(slice);
-        const chunkBlob = new Blob([sliceBytes], {
-          type: 'application/octet-stream',
-        });
-
-        let chunkData: ChunkResponse | null = null;
-        const qs = new URLSearchParams({
-          uploadId,
-          chunkIndex: String(idx),
-          totalChunks: String(totalChunks),
-          filename: file.name,
-          mimeType: file.type || 'video/mp4',
-        });
-
-        for (let attempt = 0; attempt < 3; attempt++) {
-          try {
-            // Primary path: raw binary octet-stream avoids mobile FormData boundary/proxy issues
-            chunkData = await postRawChunkResilient<ChunkResponse>(
-              `/api/videos/upload-chunk-raw?${qs.toString()}`,
-              sliceBytes,
-              60_000,
-              'အင်တာနက်လိုင်း နှေးနေပါသည်။ ထပ်မံကြိုးစားပေးပါ။'
-            );
-            break;
-          } catch (rawErr) {
-            if (rawErr instanceof CookieCheckError) {
-              throw rawErr;
-            }
-            // Secondary fallback: multipart FormData upload
-            const formData = new FormData();
-            formData.append('chunk', chunkBlob, `chunk_${idx}`);
-            formData.append('uploadId', uploadId);
-            formData.append('chunkIndex', String(idx));
-            formData.append('totalChunks', String(totalChunks));
-            formData.append('filename', file.name);
-            formData.append('mimeType', file.type || 'video/mp4');
-
-            try {
-              chunkData = await postFormDataResilient<ChunkResponse>(
-                '/api/videos/upload-chunk',
-                formData,
-                60_000,
-                'အင်တာနက်လိုင်း နှေးနေပါသည်။ ထပ်မံကြိုးစားပေးပါ။'
-              );
-              break;
-            } catch (chunkErr) {
-              if (chunkErr instanceof CookieCheckError || attempt === 2) {
-                throw chunkErr;
-              }
-              await new Promise((r) => setTimeout(r, UPLOAD_RETRY_DELAYS_MS[attempt] ?? 1400));
-            }
-          }
-        }
-
-        setUploadProgress(Math.round(((idx + 1) / totalChunks) * 100));
-
-        if (chunkData?.done && chunkData.videoId) {
-          finalMeta = {
-            videoId: chunkData.videoId,
-            filename: chunkData.filename || file.name,
-            sizeBytes: chunkData.sizeBytes || file.size,
-            mimeType: chunkData.mimeType || file.type || 'video/mp4',
-          };
-        }
-      }
-
-      if (!finalMeta) {
-        throw new Error('ဗီဒီယို Upload အဆုံးသတ်မအောင်မြင်ပါ။');
-      }
-      setVideoMeta(finalMeta);
-      return finalMeta;
-    } catch (err) {
-      if (
-        err instanceof CookieCheckError ||
-        (isNetworkFetchError(err) && (isEmbeddedIframe() || isInAppBrowser()))
-      ) {
-        setCookieAuthNeeded(true);
-      }
-      setVideoMeta(null);
-      const msg = isNetworkFetchError(err)
-        ? 'Server နှင့် ချိတ်ဆက်မှု ယာယီပြတ်တောက်သွားပါသည်။ Chrome Tab အသစ်တွင် ဖွင့်ကြည့်ပါ (သို့) "ပြန်တင်မည် (Retry)" ကို နှိပ်ပေးပါ။'
-        : err instanceof Error
-        ? err.message
-        : 'ဗီဒီယို Upload လုပ်ရာတွင် အမှားဖြစ်ပွားပါသည်။';
-      setUploadError(msg);
-      throw err;
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(null);
+  const handleSaveGeminiApiKey = useCallback((nextKey: string) => {
+    const saved = saveStoredGeminiApiKey(nextKey);
+    setGeminiApiKey(saved);
+    if (saved) {
+      setGenerateError(null);
     }
   }, []);
 
   const handleSelectFile = useCallback(
-    async (file: File) => {
+    (file: File) => {
+      if (file.size === 0) {
+        setRenderError('ရွေးချယ်ထားသော ဗီဒီယိုဖိုင် အလွတ်ဖြစ်နေပါသည် (0 bytes)။');
+        return;
+      }
+
       selectedFileRef.current = file;
-      setVideoMeta(null);
-      setUploadError(null);
       setGenerateError(null);
       setRenderError(null);
-      setCookieAuthNeeded(false);
       setVideoDuration(0);
       setRangeStartInput('00:00');
       setRangeEndInput('');
@@ -403,49 +263,28 @@ export default function App() {
       }
       const nextUrl = URL.createObjectURL(file);
       setLocalVideoUrl(nextUrl);
-
-      try {
-        await uploadFileToServer(file);
-      } catch {
-        // Error state already captured in uploadError
-      }
+      setVideoMeta({
+        videoId: `local_${Date.now()}`,
+        filename: file.name,
+        sizeBytes: file.size,
+        mimeType: file.type || 'video/mp4',
+      });
     },
-    [localVideoUrl, uploadFileToServer]
+    [localVideoUrl]
   );
 
-  const handleRetryUpload = useCallback(async () => {
-    if (!selectedFileRef.current || isUploading) return;
-    try {
-      await uploadFileToServer(selectedFileRef.current);
-    } catch {
-      // Error state already captured in uploadError
-    }
-  }, [isUploading, uploadFileToServer]);
-
-  const handleUnlockPreviewCookies = useCallback(async () => {
-    await tryRequestStorageAccess();
-    const ok = await checkServerSessionOk();
-    if (ok) {
-      setCookieAuthNeeded(false);
-      setUploadError(null);
-      if (selectedFileRef.current && !videoMeta && !isUploading) {
-        try {
-          await uploadFileToServer(selectedFileRef.current);
-        } catch {
-          // Error captured in uploadError
-        }
-      }
-    }
-  }, [isUploading, uploadFileToServer, videoMeta]);
-
   const handleGenerateSubtitles = useCallback(async () => {
-    if (isUploading) {
-      setGenerateError('ဗီဒီယို Server သို့ တင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပေးပါ။');
+    const activeFile = selectedFileRef.current;
+    if (!activeFile) {
+      setGenerateError('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်ရွေးချယ်ထည့်ပေးပါ။');
       return;
     }
 
-    if (!videoMeta?.videoId && !selectedFileRef.current) {
-      setGenerateError('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်တင်ပေးပါ။');
+    const activeApiKey = geminiApiKey.trim() || getStoredGeminiApiKey();
+    if (!activeApiKey) {
+      setGenerateError(
+        'AI စာတန်းထိုးထုတ်ရန် အပေါ်ရှိ Gemini API Key အကွက်တွင် Key ထည့်သွင်းပြီး Save နှိပ်ပေးပါ။'
+      );
       return;
     }
 
@@ -478,54 +317,19 @@ export default function App() {
     }
 
     setGenerateError(null);
-    setCookieAuthNeeded(false);
+    setGenerateProgressText('အသံဖိုင်ခွဲထုတ်နေပါသည်...');
     setIsGenerating(true);
     try {
-      let activeVideoId = videoMeta?.videoId;
-      if (!activeVideoId && selectedFileRef.current) {
-        const reuploaded = await uploadFileToServer(selectedFileRef.current);
-        activeVideoId = reuploaded.videoId;
-      }
-
-      const requestSubtitles = async (targetVideoId: string) => {
-        const res = await resilientFetch(
-          '/api/subtitles/generate',
-          {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              videoId: targetVideoId,
-              mode: modeId,
-              model: modelId,
-              startSec,
-              endSec,
-              customPrompt: customPrompt.trim() || undefined,
-            }),
-          },
-          300_000,
-          'AI ဘာသာပြန်ချိန် ၅ မိနစ်ကျော်သွားပါသည်။ သီချင်းအပိုင်းခွဲ (Range) ဖြင့် ထပ်မံကြိုးစားကြည့်ပါ။'
-        );
-        return await parseApiResponse<{
-          srt: string;
-          rangeStartSec?: number;
-          rangeEndSec?: number;
-        }>(res);
-      };
-
-      let data: { srt: string; rangeStartSec?: number; rangeEndSec?: number };
-      try {
-        data = await requestSubtitles(activeVideoId!);
-      } catch (firstErr) {
-        const errMsg = firstErr instanceof Error ? firstErr.message : '';
-        // If Cloud Run restarted and cleared /tmp uploads, transparently re-upload selected file once
-        if (errMsg.includes('အရင်တင်ပေးပါ') && selectedFileRef.current) {
-          const reuploaded = await uploadFileToServer(selectedFileRef.current);
-          data = await requestSubtitles(reuploaded.videoId);
-        } else {
-          throw firstErr;
-        }
-      }
+      const data = await generateSubtitlesClient({
+        apiKey: activeApiKey,
+        file: activeFile,
+        mode: modeId,
+        model: modelId,
+        startSec,
+        endSec,
+        customPrompt: customPrompt.trim() || undefined,
+        onProgress: setGenerateProgressText,
+      });
 
       if (!data.srt) {
         throw new Error('AI ထံမှ စာတန်းမရရှိပါ။');
@@ -548,19 +352,15 @@ export default function App() {
         setSrtText(data.srt);
       }
     } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-      }
       setGenerateError(
         err instanceof Error ? err.message : 'AI စာတန်းထုတ်ရာတွင် အမှားဖြစ်ပွားပါသည်။'
       );
     } finally {
       setIsGenerating(false);
+      setGenerateProgressText(null);
     }
   }, [
-    isUploading,
-    videoMeta,
-    uploadFileToServer,
+    geminiApiKey,
     modeId,
     modelId,
     translationScope,
@@ -578,94 +378,64 @@ export default function App() {
       return;
     }
 
+    const activeApiKey = geminiApiKey.trim() || getStoredGeminiApiKey();
+    if (!activeApiKey) {
+      setGenerateError(
+        'ဘာသာပြန်ရန် "AI စာတန်း" ထဲတွင် Gemini API Key အရင်ထည့်သွင်းပြီး Save နှိပ်ပေးပါ။'
+      );
+      return;
+    }
+
     setGenerateError(null);
-    setCookieAuthNeeded(false);
     setIsTranslatingSrt(true);
     try {
-      const res = await resilientFetch(
-        '/api/subtitles/translate-srt',
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            srtText,
-            mode: modeId,
-            model: modelId,
-            customPrompt: customPrompt.trim() || undefined,
-          }),
-        },
-        180_000,
-        'ဘာသာပြန်ချိန် ကြာမြင့်နေပါသည်။ ထပ်မံကြိုးစားကြည့်ပါ။'
-      );
-      const data = await parseApiResponse<{ srt: string }>(res);
-      if (!data.srt) {
+      const translatedSrt = await translateSrtClient({
+        apiKey: activeApiKey,
+        srtText,
+        mode: modeId,
+        model: modelId,
+        customPrompt: customPrompt.trim() || undefined,
+      });
+      if (!translatedSrt) {
         throw new Error('AI ထံမှ ဘာသာပြန်စာတန်း မရရှိပါ။');
       }
-      setSrtText(data.srt);
+      setSrtText(translatedSrt);
     } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-      }
       setGenerateError(
         err instanceof Error ? err.message : 'AI ဘာသာပြန်ရာတွင် အမှားဖြစ်ပွားပါသည်။'
       );
     } finally {
       setIsTranslatingSrt(false);
     }
-  }, [srtText, modeId, modelId, customPrompt]);
+  }, [geminiApiKey, srtText, modeId, modelId, customPrompt]);
 
-  const uploadPreparedLogoToServer = useCallback(async (prepared: File) => {
-    const formData = new FormData();
-    formData.append('logo', prepared);
+  const handleUploadLogoFile = useCallback(async (rawFile: File) => {
+    setLogoError(null);
+    setIsUploadingLogo(true);
+    try {
+      const prepared = await prepareLogoFileForUpload(rawFile);
+      const previewUrl = URL.createObjectURL(prepared);
 
-    return await postFormDataResilient<{
-      logoId: string;
-      filename: string;
-      sizeBytes: number;
-      mimeType: string;
-    }>(
-      '/api/logos/upload',
-      formData,
-      60_000,
-      'Logo Upload လုပ်ချိန် ကြာမြင့်နေပါသည်။ ထပ်မံကြိုးစားပေးပါ။'
-    );
+      setLogoMeta({
+        logoId: `local_logo_${Date.now()}`,
+        filename: prepared.name,
+        sizeBytes: prepared.size,
+        mimeType: prepared.type || 'image/png',
+        previewUrl,
+      });
+      setLogoConfig((prev) => ({ ...prev, enabled: true }));
+      setActiveMonitorTab('preview');
+    } catch (err) {
+      setLogoError(
+        err instanceof Error ? err.message : 'Logo ထည့်သွင်းရာတွင် အမှားဖြစ်ပွားပါသည်။'
+      );
+    } finally {
+      setIsUploadingLogo(false);
+    }
   }, []);
-
-  const handleUploadLogoFile = useCallback(
-    async (rawFile: File) => {
-      setLogoError(null);
-      setCookieAuthNeeded(false);
-      setIsUploadingLogo(true);
-      try {
-        const prepared = await prepareLogoFileForUpload(rawFile);
-        logoFileRef.current = prepared;
-        const data = await uploadPreparedLogoToServer(prepared);
-
-        const previewUrl = URL.createObjectURL(prepared);
-        setLogoMeta({
-          ...data,
-          previewUrl,
-        });
-        setLogoConfig((prev) => ({ ...prev, enabled: true }));
-        setActiveMonitorTab('preview');
-      } catch (err) {
-        if (err instanceof CookieCheckError) {
-          setCookieAuthNeeded(true);
-        }
-        setLogoError(
-          err instanceof Error ? err.message : 'Logo Upload လုပ်ရာတွင် အမှားဖြစ်ပွားပါသည်။'
-        );
-      } finally {
-        setIsUploadingLogo(false);
-      }
-    },
-    [uploadPreparedLogoToServer]
-  );
 
   const handleRemoveLogo = useCallback(() => {
     setLogoError(null);
-    logoFileRef.current = null;
     setLogoMeta(null);
   }, []);
 
@@ -698,32 +468,17 @@ export default function App() {
     if (isOwnAppUrl(trimmed)) {
       setInspectedLinkInfo(null);
       setLinkDownloadError(
-        'ဤ Link သည် Myanmar MV Studio App ၏ Link ဖြစ်နေပါသည် — ကျေးဇူးပြု၍ TikTok, Facebook, Instagram သို့မဟုတ် MP4 Video Link အစစ်ကို ထည့်ပေးပါ။'
+        'ဤ Link သည် Myanmar MV Studio App ၏ Link ဖြစ်နေပါသည် — ကျေးဇူးပြု၍ Direct .mp4 / .mp3 Media Link သို့မဟုတ် Video Link အစစ်ကို ထည့်ပေးပါ။'
       );
       return;
     }
 
     setLinkDownloadError(null);
-    setCookieAuthNeeded(false);
     setIsInspectingLink(true);
     try {
-      const res = await resilientFetch(
-        '/api/video-downloader/inspect',
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: trimmed }),
-        },
-        45_000,
-        'Video Link စစ်ဆေးချိန် ကြာမြင့်နေပါသည်။ ထပ်မံကြိုးစားပေးပါ။'
-      );
-      const data = await parseApiResponse<InspectedVideoLinkInfo>(res);
+      const data = await inspectVideoLinkClient(trimmed);
       setInspectedLinkInfo(data);
     } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-      }
       setInspectedLinkInfo(null);
       setLinkDownloadError(
         err instanceof Error
@@ -747,41 +502,27 @@ export default function App() {
     if (isOwnAppUrl(trimmed)) {
       setInspectedLinkInfo(null);
       setLinkDownloadError(
-        'ဤ Link သည် Myanmar MV Studio App ၏ Link ဖြစ်နေပါသည် — ကျေးဇူးပြု၍ TikTok, Facebook, Instagram သို့မဟုတ် MP4 Video Link အစစ်ကို ထည့်ပေးပါ။'
+        'ဤ Link သည် Myanmar MV Studio App ၏ Link ဖြစ်နေပါသည် — ကျေးဇူးပြု၍ Direct .mp4 / .mp3 Media Link သို့မဟုတ် Video Link အစစ်ကို ထည့်ပေးပါ။'
       );
       return;
     }
 
     setLinkDownloadError(null);
-    setCookieAuthNeeded(false);
     setIsDownloadingLink(true);
     try {
-      const res = await resilientFetch(
-        '/api/video-downloader/download',
-        {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            url: trimmed,
-            quality: downloaderQuality,
-          }),
-        },
-        240_000,
-        'Video ဒေါင်းယူချိန် ကြာမြင့်နေပါသည်။ 480p သို့မဟုတ် 720p ပြောင်းရွေးပြီး ထပ်စမ်းကြည့်ပါ။'
-      );
-      const item = await parseApiResponse<DownloadedVideoItem>(res);
-      setDownloadedItems((prev) => [item, ...prev.filter((p) => p.downloadId !== item.downloadId)]);
+      const item = await downloadVideoLinkClient(trimmed, downloaderQuality);
+      setDownloadedItems((prev) => [
+        item,
+        ...prev.filter((p) => p.downloadId !== item.downloadId),
+      ]);
       setInspectedLinkInfo({
         url: item.sourceUrl,
         title: item.title,
         platform: item.platform,
         durationSec: item.durationSec,
+        isDirectFile: true,
       });
     } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-      }
       setLinkDownloadError(
         err instanceof Error
           ? err.message
@@ -792,21 +533,13 @@ export default function App() {
     }
   }, [downloaderUrl, downloaderQuality]);
 
-  const handleSaveDownloadedFile = useCallback(async (item: DownloadedVideoItem) => {
+  const handleSaveDownloadedFile = useCallback((item: DownloadedVideoItem) => {
     setLinkDownloadError(null);
     setSavingDownloadId(item.downloadId);
-    setSavingDownloadProgress(0);
+    setSavingDownloadProgress(null);
     try {
-      const blob = await fetchVideoBlobInChunks(
-        item.downloadUrl,
-        item.sizeBytes,
-        setSavingDownloadProgress
-      );
-      triggerBlobDownload(blob, item.filename);
-    } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-        setLinkDownloadError(err.message);
+      if (item.downloadUrl.startsWith('blob:')) {
+        triggerObjectUrlDownload(item.downloadUrl, item.filename);
       } else {
         triggerDirectDownload(item.downloadUrl, item.filename);
       }
@@ -824,19 +557,24 @@ export default function App() {
       return;
     }
 
+    if (!item.downloadUrl.startsWith('blob:')) {
+      triggerDirectDownload(item.downloadUrl, item.filename);
+      return;
+    }
+
     setLinkDownloadError(null);
     setSavingDownloadId(item.downloadId);
-    setSavingDownloadProgress(0);
+    setSavingDownloadProgress(null);
     try {
-      const blob = await fetchVideoBlobInChunks(
-        item.downloadUrl,
-        item.sizeBytes,
-        setSavingDownloadProgress
+      const res = await fetch(item.downloadUrl);
+      const blob = await res.blob();
+      const safeName = getAsciiSafeMediaFilename(
+        item.filename,
+        item.isAudioOnly ? '.mp3' : '.mp4'
       );
-      const safeName = item.isAudioOnly
-        ? 'downloaded_audio.mp3'
-        : getAsciiSafeMp4Filename(item.filename);
-      const file = new File([blob], safeName, { type: item.mimeType || 'video/mp4' });
+      const file = new File([blob], safeName, {
+        type: item.mimeType || (item.isAudioOnly ? 'audio/mpeg' : 'video/mp4'),
+      });
       if (
         typeof navigator !== 'undefined' &&
         typeof navigator.canShare === 'function' &&
@@ -853,12 +591,7 @@ export default function App() {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
       }
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-        setLinkDownloadError(err.message);
-      } else {
-        triggerDirectDownload(item.downloadUrl, item.filename);
-      }
+      triggerObjectUrlDownload(item.downloadUrl, item.filename);
     } finally {
       setSavingDownloadId(null);
       setSavingDownloadProgress(null);
@@ -868,55 +601,32 @@ export default function App() {
   const handleUseDownloadedInStudio = useCallback(
     async (item: DownloadedVideoItem) => {
       if (item.isAudioOnly) return;
+      if (!item.downloadUrl.startsWith('blob:')) {
+        setLinkDownloadError(
+          'ဤ External Link ၏ Server သည် Browser CORS ခွင့်ပြုမထားသောကြောင့် Studio ထဲသို့ တိုက်ရိုက်သွင်းမရပါ — "Video ဖုန်းထဲ Save မည်" ဖြင့် အရင်ဒေါင်းပြီးမှ Studio ထဲတွင် Video ဖိုင်ရွေးထည့်ပေးပါ။'
+        );
+        return;
+      }
+
       setLinkDownloadError(null);
-      setCookieAuthNeeded(false);
       setLoadingToStudioId(item.downloadId);
       try {
-        const res = await resilientFetch(
-          '/api/video-downloader/use-in-studio',
-          {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ downloadId: item.downloadId }),
-          },
-          45_000,
-          'Studio ထဲသို့ ဗီဒီယိုထည့်ချိန် ကြာမြင့်နေပါသည်။'
-        );
-        const meta = await parseApiResponse<StudioVideoMeta>(res);
-        const videoBlob = await fetchVideoBlobInChunks(item.downloadUrl, item.sizeBytes);
-        const safeName = getAsciiSafeMp4Filename(meta.filename);
+        const res = await fetch(item.downloadUrl);
+        const videoBlob = await res.blob();
+        const safeName = getAsciiSafeMediaFilename(item.filename, '.mp4');
         const localFile = new File([videoBlob], safeName, {
-          type: meta.mimeType || 'video/mp4',
+          type: item.mimeType || 'video/mp4',
         });
-        selectedFileRef.current = localFile;
-
-        if (localVideoUrl) {
-          URL.revokeObjectURL(localVideoUrl);
+        handleSelectFile(localFile);
+        if (item.durationSec) {
+          setVideoDuration(item.durationSec);
         }
-        const nextUrl = URL.createObjectURL(videoBlob);
-        setLocalVideoUrl(nextUrl);
-        setVideoMeta(meta);
-        setUploadError(null);
-        setGenerateError(null);
-        setRenderError(null);
-        setVideoDuration(item.durationSec ?? 0);
-        setRangeStartInput('00:00');
-        setRangeEndInput('');
-        setRenderResult((prev) => {
-          if (prev?.blobUrl) URL.revokeObjectURL(prev.blobUrl);
-          return null;
-        });
-        setActiveMonitorTab('preview');
-        setViewMode('editor');
+        navigateView('editor');
         setOpenToolId('ai_subtitle');
         setTimeout(() => {
           monitorSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }, 80);
       } catch (err) {
-        if (err instanceof CookieCheckError) {
-          setCookieAuthNeeded(true);
-        }
         setLinkDownloadError(
           err instanceof Error
             ? err.message
@@ -926,160 +636,59 @@ export default function App() {
         setLoadingToStudioId(null);
       }
     },
-    [localVideoUrl]
+    [handleSelectFile, navigateView]
   );
 
   const handleRenderVideo = useCallback(async () => {
-    if (isUploading) {
-      setRenderError('ဗီဒီယို Server သို့ တင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပေးပါ။');
-      return;
-    }
-    if (!videoMeta?.videoId && !selectedFileRef.current) {
-      setRenderError('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်တင်ပေးပါ။');
+    if (!localVideoUrl) {
+      setRenderError('ကျေးဇူးပြု၍ ဗီဒီယိုဖိုင် အရင်ရွေးချယ်ထည့်ပေးပါ။');
       return;
     }
 
     setRenderError(null);
-    setCookieAuthNeeded(false);
+    setRenderProgress(0);
     setOpenToolId('export');
     setIsRendering(true);
     try {
-      let activeVideoId = videoMeta?.videoId;
-      if (!activeVideoId && selectedFileRef.current) {
-        const reuploaded = await uploadFileToServer(selectedFileRef.current);
-        activeVideoId = reuploaded.videoId;
-      }
-
-      let activeLogoId = logoMeta?.logoId;
-
-      const executeRender = async (
-        targetVideoId: string,
-        targetLogoId: string | undefined
-      ) => {
-        const res = await resilientFetch(
-          '/api/videos/render',
-          {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              videoId: targetVideoId,
-              srtText,
-              colorPresetId,
-              brightness,
-              contrast,
-              saturation,
-              fontName,
-              fontSize,
-              textColorId,
-              positionId,
-              subtitleX,
-              subtitleY,
-              subtitleAnimation,
-              videoAspectId,
-              videoFitMode,
-              logo:
-                targetLogoId && logoConfig.enabled
-                  ? {
-                      logoId: targetLogoId,
-                      enabled: true,
-                      position: logoConfig.position,
-                      xPct: logoConfig.xPct,
-                      yPct: logoConfig.yPct,
-                      scalePct: logoConfig.scalePct,
-                      opacity: logoConfig.opacity,
-                      marginPct: logoConfig.marginPct,
-                      animation: logoConfig.animation,
-                    }
-                  : undefined,
-              textLogo:
-                textLogoConfig.enabled && textLogoConfig.text.trim().length > 0
-                  ? {
-                      enabled: true,
-                      text: textLogoConfig.text.trim(),
-                      styleId: textLogoConfig.styleId,
-                      colorId: textLogoConfig.colorId,
-                      animationId: textLogoConfig.animationId,
-                      xPct: textLogoConfig.xPct,
-                      yPct: textLogoConfig.yPct,
-                      size: textLogoConfig.size,
-                      opacity: textLogoConfig.opacity,
-                    }
-                  : undefined,
-            }),
-          },
-          240_000,
-          'MP4 Render လုပ်ချိန် ကြာမြင့်နေပါသည်။ ထပ်မံကြိုးစားပေးပါ။'
-        );
-        return await parseApiResponse<RenderResult>(res);
-      };
-
-      let data: RenderResult;
-      try {
-        data = await executeRender(activeVideoId!, activeLogoId);
-      } catch (firstErr) {
-        const errMsg = firstErr instanceof Error ? firstErr.message : '';
-        let retried = false;
-        if (errMsg.includes('အရင်တင်ပေးပါ') && selectedFileRef.current) {
-          const reuploaded = await uploadFileToServer(selectedFileRef.current);
-          activeVideoId = reuploaded.videoId;
-          retried = true;
-        }
-        if (errMsg.includes('Logo ဖိုင်') && logoFileRef.current) {
-          const reuploadedLogo = await uploadPreparedLogoToServer(logoFileRef.current);
-          activeLogoId = reuploadedLogo.logoId;
-          setLogoMeta((prev) => (prev ? { ...prev, logoId: reuploadedLogo.logoId } : prev));
-          retried = true;
-        }
-        if (retried) {
-          data = await executeRender(activeVideoId!, activeLogoId);
-        } else {
-          throw firstErr;
-        }
-      }
-
-      if (!data.renderId) {
-        throw new Error('ဗီဒီယို Render ထုတ်ရာတွင် အမှားဖြစ်ပွားပါသည်။');
-      }
+      const data = await exportVideoInBrowser({
+        videoUrl: localVideoUrl,
+        sourceFilename: videoMeta?.filename || selectedFileRef.current?.name,
+        cues,
+        colorPresetId,
+        brightness,
+        contrast,
+        saturation,
+        fontName,
+        fontSize,
+        textColorId,
+        subtitleX,
+        subtitleY,
+        subtitleAnimation,
+        videoAspectId,
+        videoFitMode,
+        logoMeta,
+        logoConfig,
+        textLogoConfig,
+        onProgress: setRenderProgress,
+      });
 
       setRenderResult((prev) => {
         if (prev?.blobUrl) URL.revokeObjectURL(prev.blobUrl);
         return data;
       });
       setActiveMonitorTab('rendered');
-
-      if (data.sizeBytes <= 28 * 1024 * 1024) {
-        fetchVideoBlobInChunks(data.videoUrl, data.sizeBytes)
-          .then((videoBlob) => {
-            const nextBlobUrl = URL.createObjectURL(videoBlob);
-            setRenderResult((prev) => {
-              if (!prev || prev.renderId !== data.renderId) {
-                URL.revokeObjectURL(nextBlobUrl);
-                return prev;
-              }
-              return { ...prev, blobUrl: nextBlobUrl };
-            });
-          })
-          .catch(() => {
-            // Will download on-demand via chunked Range fetch when user clicks Download
-          });
-      }
     } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-      }
       setRenderError(
-        err instanceof Error ? err.message : 'FFmpeg Render လုပ်ရာတွင် အမှားဖြစ်ပွားပါသည်။'
+        err instanceof Error ? err.message : 'Browser ဖြင့် ဗီဒီယိုထုတ်ရာတွင် အမှားဖြစ်ပွားပါသည်။'
       );
     } finally {
       setIsRendering(false);
+      setRenderProgress(null);
     }
   }, [
-    isUploading,
-    videoMeta,
-    uploadFileToServer,
-    uploadPreparedLogoToServer,
-    srtText,
+    localVideoUrl,
+    videoMeta?.filename,
+    cues,
     colorPresetId,
     brightness,
     contrast,
@@ -1087,7 +696,6 @@ export default function App() {
     fontName,
     fontSize,
     textColorId,
-    positionId,
     subtitleX,
     subtitleY,
     subtitleAnimation,
@@ -1098,40 +706,14 @@ export default function App() {
     textLogoConfig,
   ]);
 
-  const handleDownloadMp4 = useCallback(async () => {
+  const handleDownloadMp4 = useCallback(() => {
     if (!renderResult) return;
     setRenderError(null);
-
-    if (renderResult.blobUrl) {
-      triggerObjectUrlDownload(renderResult.blobUrl, renderResult.filename);
-      return;
-    }
-
-    setIsDownloadingMp4(true);
-    setDownloadProgress(0);
-    try {
-      const blob = await fetchVideoBlobInChunks(
-        renderResult.videoUrl,
-        renderResult.sizeBytes,
-        setDownloadProgress
-      );
-      const nextBlobUrl = URL.createObjectURL(blob);
-      setRenderResult((prev) =>
-        prev && prev.renderId === renderResult.renderId
-          ? { ...prev, blobUrl: nextBlobUrl }
-          : prev
-      );
-      triggerObjectUrlDownload(nextBlobUrl, renderResult.filename);
-    } catch (err) {
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-        setRenderError(err.message);
-      } else {
-        triggerDirectDownload(renderResult.videoUrl, renderResult.filename);
-      }
-    } finally {
-      setIsDownloadingMp4(false);
-      setDownloadProgress(null);
+    const url = renderResult.blobUrl || renderResult.videoUrl;
+    if (url.startsWith('blob:')) {
+      triggerObjectUrlDownload(url, renderResult.filename);
+    } else {
+      triggerDirectDownload(url, renderResult.filename);
     }
   }, [renderResult]);
 
@@ -1147,76 +729,53 @@ export default function App() {
     if (!renderResult) return;
     if (renderResult.sizeBytes > 150 * 1024 * 1024) {
       setRenderError(
-        'ဖိုင်အရွယ်အစား 150 MB ထက် ကြီးသောကြောင့် "Download MP4" ခလုတ်ဖြင့် ဒေါင်းလုဒ်ဆွဲပါ။'
+        'ဖိုင်အရွယ်အစား 150 MB ထက် ကြီးသောကြောင့် "Download Video" ခလုတ်ဖြင့် ဒေါင်းလုဒ်ဆွဲပါ။'
       );
       return;
     }
 
     setRenderError(null);
     setIsDownloadingMp4(true);
-    setDownloadProgress(0);
+    setDownloadProgress(null);
     try {
-      let blob: Blob;
-      if (renderResult.blobUrl) {
-        const res = await fetch(renderResult.blobUrl);
-        blob = await res.blob();
-      } else {
-        blob = await fetchVideoBlobInChunks(
-          renderResult.videoUrl,
-          renderResult.sizeBytes,
-          setDownloadProgress
-        );
-        const nextBlobUrl = URL.createObjectURL(blob);
-        setRenderResult((prev) =>
-          prev && prev.renderId === renderResult.renderId
-            ? { ...prev, blobUrl: nextBlobUrl }
-            : prev
-        );
-      }
-
-      const safeFilename = getAsciiSafeMp4Filename(renderResult.filename);
-      const file = new File([blob], safeFilename, { type: 'video/mp4' });
+      const targetUrl = renderResult.blobUrl || renderResult.videoUrl;
+      const res = await fetch(targetUrl);
+      const blob = await res.blob();
+      const mimeType =
+        blob.type ||
+        (renderResult.filename.toLowerCase().endsWith('.webm')
+          ? 'video/webm'
+          : 'video/mp4');
+      const fallbackExt = mimeType.includes('webm') ? '.webm' : '.mp4';
+      const safeFilename = getAsciiSafeMediaFilename(renderResult.filename, fallbackExt);
+      const file = new File([blob], safeFilename, { type: mimeType });
       if (navigator.canShare({ files: [file] })) {
         await navigator.share({
           files: [file],
           title: safeFilename,
         });
       } else {
-        triggerObjectUrlDownload(
-          renderResult.blobUrl || URL.createObjectURL(blob),
-          safeFilename
-        );
+        triggerBlobDownload(blob, safeFilename);
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
       }
-      if (err instanceof CookieCheckError) {
-        setCookieAuthNeeded(true);
-        setRenderError(err.message);
-      } else {
-        triggerDirectDownload(renderResult.videoUrl, renderResult.filename);
-      }
+      const fallbackUrl = renderResult.blobUrl || renderResult.videoUrl;
+      triggerObjectUrlDownload(fallbackUrl, renderResult.filename);
     } finally {
       setIsDownloadingMp4(false);
       setDownloadProgress(null);
     }
   }, [renderResult]);
 
-  const handleDownloadSrt = useCallback(async () => {
-    if (!renderResult?.srtUrl) return;
-    try {
-      const blob = await fetchAuthenticatedBlob(renderResult.srtUrl);
-      triggerBlobDownload(blob, 'subtitles.srt');
-    } catch {
-      if (srtText.trim()) {
-        const fallbackBlob = new Blob([srtText.trim() + '\n'], {
-          type: 'text/plain;charset=utf-8',
-        });
-        triggerBlobDownload(fallbackBlob, 'subtitles.srt');
-      }
-    }
-  }, [renderResult, srtText]);
+  const handleDownloadSrt = useCallback(() => {
+    if (!srtText.trim()) return;
+    const fallbackBlob = new Blob([srtText.trim() + '\n'], {
+      type: 'text/plain;charset=utf-8',
+    });
+    triggerBlobDownload(fallbackBlob, 'subtitles.srt');
+  }, [srtText]);
 
   const handleSeekHandled = useCallback(() => {
     setSeekRequestTime(null);
@@ -1270,26 +829,32 @@ export default function App() {
     setOpenToolId((prev) => (prev === toolId ? null : toolId));
   }, []);
 
-  const jumpToTool = useCallback((toolId: GuideToolTargetId) => {
-    if (toolId === 'video_downloader') {
-      setViewMode('downloader');
-      return;
-    }
-    setViewMode('editor');
-    setOpenToolId(toolId);
-    setTimeout(() => scrollToSection(toolsSectionRef), 60);
-  }, []);
+  const jumpToTool = useCallback(
+    (toolId: GuideToolTargetId) => {
+      if (toolId === 'video_downloader') {
+        navigateView('downloader');
+        return;
+      }
+      navigateView('editor');
+      setOpenToolId(toolId);
+      setTimeout(() => scrollToSection(toolsSectionRef), 60);
+    },
+    [navigateView]
+  );
 
-  const openEditor = useCallback((initialTool: StudioToolId | null = 'ai_subtitle') => {
-    setViewMode('editor');
-    if (initialTool !== undefined) {
-      setOpenToolId(initialTool);
-    }
-  }, []);
+  const openEditor = useCallback(
+    (initialTool: StudioToolId | null = 'ai_subtitle') => {
+      navigateView('editor');
+      if (initialTool !== undefined) {
+        setOpenToolId(initialTool);
+      }
+    },
+    [navigateView]
+  );
 
   const openDownloader = useCallback(() => {
-    setViewMode('downloader');
-  }, []);
+    navigateView('downloader');
+  }, [navigateView]);
 
   const shareableUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -1307,82 +872,42 @@ export default function App() {
       setCopiedShareLink(true);
       setTimeout(() => setCopiedShareLink(false), 2200);
     } catch {
-      const input = document.createElement('input');
-      input.value = shareableUrl;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      document.body.removeChild(input);
+      try {
+        const input = document.createElement('input');
+        input.value = shareableUrl;
+        document.body.appendChild(input);
+        input.select();
+        document.execCommand('copy');
+        document.body.removeChild(input);
+      } catch {
+        // Ignore clipboard denial in restricted contexts
+      }
       setCopiedShareLink(true);
       setTimeout(() => setCopiedShareLink(false), 2200);
     }
   }, [shareableUrl]);
 
-  const cookieBanner = cookieAuthNeeded ? (
-    <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-      <p className="text-xs text-amber-200 leading-relaxed">
-        {isEmbeddedIframe()
-          ? 'AI Studio Preview box အတွင်း၌ Chrome သည် Security Cookie ကို ပိတ်ထားတတ်ပါသည်။ "Chrome Tab အသစ်တွင် ဖွင့်မည်" ကို နှိပ်၍ Tab အသစ်တွင် ဖွင့်သုံးပေးပါ။'
-          : isInAppBrowser()
-          ? 'Facebook / Messenger App အတွင်းမှ ဖွင့်ထားပါက Video တင်မရပါ။ ညာဘက်အပေါ် ⋮ မှ "Open in Chrome / External Browser" ဖြင့် ဖွင့်သုံးပေးပါ။'
-          : 'Google Login / Security Cookie သက်တမ်းကုန်သွားပါသည်။ ခလုတ်ကိုနှိပ်၍ Security ပြန်ချိတ်ဆက်ပြီးမှ Video တင်ပေးပါ (တခြားသူများ သုံးမရလျှင် ဖြေရှင်းနည်းကိုလည်း ကြည့်နိုင်ပါသည်)။'}
+  const inAppBrowserBanner = isInAppBrowser() ? (
+    <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <p className="text-xs text-sky-200 leading-relaxed">
+        Facebook / Messenger App အတွင်းမှ ဖွင့်ထားပါက File Download အချို့ မဆင်းတတ်ပါ။ ညာဘက်အပေါ် ⋮ မှ{' '}
+        <span className="font-semibold text-white">Open in Chrome / Safari</span> ဖြင့် ဖွင့်သုံးပါက အကောင်းဆုံးဖြစ်ပါသည်။
       </p>
-      <div className="flex flex-wrap items-center gap-2 shrink-0">
-        {isEmbeddedIframe() && canRequestStorageAccess() && (
-          <button
-            type="button"
-            onClick={handleUnlockPreviewCookies}
-            className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-100 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            Preview ထဲတွင် ခွင့်ပြုချက်စမ်းမည်
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => setShowGuestShareHelp(true)}
-          className="px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          အများသုံးနည်း
-        </button>
-        <a
-          href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-          target={isEmbeddedIframe() || isInAppBrowser() ? '_blank' : undefined}
-          rel={isEmbeddedIframe() || isInAppBrowser() ? 'noopener noreferrer' : undefined}
-          className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold whitespace-nowrap shrink-0 text-center"
-        >
-          {isEmbeddedIframe()
-            ? 'Chrome Tab အသစ်တွင် ဖွင့်မည်'
-            : isInAppBrowser()
-            ? 'Chrome / Browser ဖြင့် ဖွင့်မည်'
-            : 'Security / Login ပြန်ချိတ်ဆက်မည်'}
-        </a>
-      </div>
+      <button
+        type="button"
+        onClick={() => setShowGuestShareHelp(true)}
+        className="px-3 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+      >
+        ဖွင့်သုံးနည်း ကြည့်မည်
+      </button>
     </div>
   ) : null;
-
-  const inAppBrowserBanner =
-    !cookieAuthNeeded && isInAppBrowser() ? (
-      <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <p className="text-xs text-sky-200 leading-relaxed">
-          Facebook / Messenger App အတွင်းမှ ဖွင့်ထားပါက ဗီဒီယိုထည့်ခြင်းနှင့် Download မရနိုင်ပါ။ ညာဘက်အပေါ် ⋮ မှ{' '}
-          <span className="font-semibold text-white">Open in Chrome / Safari</span> ဖြင့် ဖွင့်သုံးပေးပါ။
-        </p>
-        <button
-          type="button"
-          onClick={() => setShowGuestShareHelp(true)}
-          className="px-3 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
-        >
-          ဖွင့်သုံးနည်း ကြည့်မည်
-        </button>
-      </div>
-    ) : null;
 
   if (viewMode === 'hub') {
     return (
       <>
-        {(cookieBanner || inAppBrowserBanner) && (
-          <div className="bg-[#080B12] px-4 sm:px-6 pt-3 max-w-5xl mx-auto space-y-2">
-            {cookieBanner}
+        {inAppBrowserBanner && (
+          <div className="bg-[#080B12] px-4 sm:px-6 pt-3 max-w-5xl mx-auto">
             {inAppBrowserBanner}
           </div>
         )}
@@ -1426,7 +951,6 @@ export default function App() {
           isInspecting={isInspectingLink}
           isDownloadingLink={isDownloadingLink}
           downloadError={linkDownloadError}
-          cookieAuthNeeded={cookieAuthNeeded}
           downloadedItems={downloadedItems}
           savingItemId={savingDownloadId}
           savingProgress={savingDownloadProgress}
@@ -1437,9 +961,8 @@ export default function App() {
           onSaveDownloadedFile={handleSaveDownloadedFile}
           onShareDownloadedFile={handleShareDownloadedFile}
           onUseDownloadedInStudio={handleUseDownloadedInStudio}
-          onBackHome={() => setViewMode('hub')}
+          onBackHome={() => navigateView('hub')}
           onOpenStudio={() => openEditor('ai_subtitle')}
-          cookieBanner={cookieBanner}
           inAppBrowserBanner={inAppBrowserBanner}
         />
         <ToolsGuideModal
@@ -1473,7 +996,7 @@ export default function App() {
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
-              onClick={() => setViewMode('hub')}
+              onClick={() => navigateView('hub')}
               aria-label="Back to Home Hub"
               className="w-10 h-10 rounded-xl bg-[#0F1420] border border-slate-800 hover:border-slate-700 text-slate-200 hover:text-white flex items-center justify-center shrink-0 cursor-pointer transition-colors"
             >
@@ -1535,11 +1058,17 @@ export default function App() {
             <button
               type="button"
               onClick={handleRenderVideo}
-              disabled={(!videoMeta && !localVideoUrl) || isUploading || isRendering}
+              disabled={(!videoMeta && !localVideoUrl) || isRendering}
               className="min-h-[40px] px-4 py-2 text-xs font-semibold rounded-xl bg-blue-600 hover:bg-blue-500 text-white inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
             >
               <Sparkles className="w-3.5 h-3.5" />
-              <span>{isRendering ? 'ထုတ်ယူနေသည်...' : 'ဗီဒီယို ထုတ်ယူမည်'}</span>
+              <span>
+                {isRendering
+                  ? renderProgress !== null
+                    ? `ထုတ်ယူနေသည် (${renderProgress}%)...`
+                    : 'ထုတ်ယူနေသည်...'
+                  : 'ဗီဒီယို ထုတ်ယူမည်'}
+              </span>
             </button>
           </div>
         </div>
@@ -1547,7 +1076,6 @@ export default function App() {
 
       {/* Main Studio Workspace */}
       <main id="top" className="flex-1 max-w-[1440px] w-full mx-auto px-3 sm:px-6 py-4 space-y-4">
-        {cookieBanner}
         {inAppBrowserBanner}
 
         {/* Two-Column Editing Workspace */}
@@ -1557,11 +1085,10 @@ export default function App() {
             <VideoMonitor
               localVideoUrl={localVideoUrl}
               videoMeta={videoMeta}
-              isUploading={isUploading}
-              uploadProgress={uploadProgress}
-              uploadError={uploadError}
+              isUploading={false}
+              uploadProgress={null}
+              uploadError={null}
               onSelectFile={handleSelectFile}
-              onRetryUpload={handleRetryUpload}
               cues={cues}
               seekRequestTime={seekRequestTime}
               onSeekHandled={handleSeekHandled}
@@ -1582,8 +1109,6 @@ export default function App() {
               subtitleAnimation={subtitleAnimation}
               videoAspectId={videoAspectId}
               videoFitMode={videoFitMode}
-              cookieAuthNeeded={cookieAuthNeeded}
-              onUnlockPreviewCookies={handleUnlockPreviewCookies}
               logoMeta={logoMeta}
               logoConfig={logoConfig}
               onChangeLogoPosition={handleChangeLogoPosition}
@@ -1600,14 +1125,11 @@ export default function App() {
             <StudioToolDeck
               hasVideo={Boolean(videoMeta)}
               hasLocalVideo={Boolean(localVideoUrl)}
-              isUploading={isUploading}
-              uploadProgress={uploadProgress}
-              uploadError={uploadError}
-              cookieAuthNeeded={cookieAuthNeeded}
-              onRetryUpload={handleRetryUpload}
               openToolId={openToolId}
               onToggleTool={handleToggleTool}
               onOpenTool={setOpenToolId}
+              geminiApiKey={geminiApiKey}
+              onSaveGeminiApiKey={handleSaveGeminiApiKey}
               modeId={modeId}
               onChangeMode={setModeId}
               modelId={modelId}
@@ -1624,6 +1146,7 @@ export default function App() {
               onChangeCustomPrompt={setCustomPrompt}
               videoDuration={videoDuration}
               isGenerating={isGenerating}
+              generateProgressText={generateProgressText}
               generateError={generateError}
               onGenerateSubtitles={handleGenerateSubtitles}
               srtText={srtText}
@@ -1673,6 +1196,7 @@ export default function App() {
               videoFitMode={videoFitMode}
               onChangeVideoFitMode={setVideoFitMode}
               isRendering={isRendering}
+              renderProgress={renderProgress}
               isDownloadingMp4={isDownloadingMp4}
               downloadProgress={downloadProgress}
               renderError={renderError}

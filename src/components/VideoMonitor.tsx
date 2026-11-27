@@ -13,12 +13,6 @@ import {
   VolumeX,
 } from 'lucide-react';
 import {
-  canRequestStorageAccess,
-  getSessionRefreshHref,
-  isEmbeddedIframe,
-  isInAppBrowser,
-} from '../lib/api';
-import {
   formatTimecodeDisplay,
   segmentLineIntoTokens,
   segmentLogoTextTokens,
@@ -68,8 +62,6 @@ interface VideoMonitorProps {
   subtitleAnimation: SubtitleAnimationId;
   videoAspectId: VideoAspectId;
   videoFitMode: VideoFitModeId;
-  cookieAuthNeeded?: boolean;
-  onUnlockPreviewCookies?: () => void;
   logoMeta: UploadedLogoMeta | null;
   logoConfig: LogoOverlayConfig;
   onChangeLogoPosition?: (xPct: number, yPct: number) => void;
@@ -89,7 +81,6 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
   uploadProgress,
   uploadError,
   onSelectFile,
-  onRetryUpload,
   cues,
   seekRequestTime,
   onSeekHandled,
@@ -110,8 +101,6 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
   subtitleAnimation,
   videoAspectId,
   videoFitMode,
-  cookieAuthNeeded = false,
-  onUnlockPreviewCookies,
   logoMeta,
   logoConfig,
   onChangeLogoPosition,
@@ -587,7 +576,7 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md bg-zinc-900 border border-zinc-800 text-zinc-200 hover:border-zinc-700 hover:bg-zinc-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
           >
             <Upload className="w-3.5 h-3.5" />
-            <span>{videoMeta ? 'ဗီဒီယိုပြောင်းမည်' : 'Upload Video'}</span>
+            <span>{videoMeta || localVideoUrl ? 'ဗီဒီယိုပြောင်းမည်' : 'Upload Video'}</span>
           </button>
           <input
             ref={fileInputRef}
@@ -641,28 +630,6 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
                 <p className="text-xs text-red-300 bg-red-950/60 border border-red-900/70 px-3 py-2 rounded-lg">
                   {uploadError}
                 </p>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  {cookieAuthNeeded && typeof window !== 'undefined' && (
-                    <a
-                      href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-                      target={isEmbeddedIframe() || isInAppBrowser() ? '_blank' : undefined}
-                      rel={isEmbeddedIframe() || isInAppBrowser() ? 'noopener noreferrer' : undefined}
-                      className="px-3 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-zinc-950 text-xs font-semibold"
-                    >
-                      Chrome Tab အသစ်တွင် ဖွင့်မည်
-                    </a>
-                  )}
-                  {onRetryUpload && (
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={onRetryUpload}
-                      className="px-3 py-1.5 rounded-md bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold cursor-pointer disabled:opacity-50"
-                    >
-                      ပြန်တင်မည် (Retry)
-                    </button>
-                  )}
-                </div>
               </div>
             )}
           </div>
@@ -715,7 +682,7 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
               onCanPlay={() => setVideoPlaybackError(null)}
               onError={() => {
                 setVideoPlaybackError(
-                  'ဤဗီဒီယို Format/Codec ကို ဖုန်း Browser Preview တွင် တိုက်ရိုက်မဖွင့်နိုင်သော်လည်း Server သို့ တင်ပြီး AI စာတန်းထိုးနှင့် MP4 Export ပြုလုပ်နိုင်ပါသည် (သို့မဟုတ် MP4/MOV ဖိုင် ပြောင်းရွေးနိုင်ပါသည်)။'
+                  'ဤဗီဒီယို Format/Codec ကို ဖုန်း Browser Preview တွင် တိုက်ရိုက်မဖွင့်နိုင်သော်လည်း AI စာတန်းထိုးထုတ်ခြင်း (သို့) MP4 / WebM ဖိုင် ပြောင်းရွေးခြင်းများ ပြုလုပ်နိုင်ပါသည်။'
                 );
               }}
               onTimeUpdate={(e) => {
@@ -954,46 +921,10 @@ export const VideoMonitor: React.FC<VideoMonitorProps> = ({
         </div>
       )}
 
-      {/* Visible Upload Error Banner (even when local video preview is playing) */}
+      {/* Visible Upload Error Banner */}
       {uploadError && videoSrc && (
-        <div className="px-4 py-2.5 bg-red-950/60 border-t border-red-900/70 flex flex-wrap items-center justify-between gap-2">
+        <div className="px-4 py-2.5 bg-red-950/60 border-t border-red-900/70">
           <p className="text-xs text-red-200">{uploadError}</p>
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {cookieAuthNeeded &&
-              isEmbeddedIframe() &&
-              canRequestStorageAccess() &&
-              onUnlockPreviewCookies && (
-                <button
-                  type="button"
-                  onClick={onUnlockPreviewCookies}
-                  className="px-3 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-100 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Preview ထဲတွင် ခွင့်ပြုချက်စမ်းမည်
-                </button>
-              )}
-            {cookieAuthNeeded && typeof window !== 'undefined' && (
-              <a
-                href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-                target={isEmbeddedIframe() || isInAppBrowser() ? '_blank' : undefined}
-                rel={isEmbeddedIframe() || isInAppBrowser() ? 'noopener noreferrer' : undefined}
-                className="px-3 py-1 rounded-md bg-sky-500 hover:bg-sky-400 text-zinc-950 text-xs font-semibold whitespace-nowrap shrink-0"
-              >
-                {isEmbeddedIframe() || isInAppBrowser()
-                  ? 'Chrome Tab အသစ်တွင် ဖွင့်မည်'
-                  : 'Security / Login ပြန်ချိတ်ဆက်မည်'}
-              </a>
-            )}
-            {onRetryUpload && (
-              <button
-                type="button"
-                disabled={isUploading}
-                onClick={onRetryUpload}
-                className="px-3 py-1 rounded-md bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-              >
-                ပြန်တင်မည် (Retry)
-              </button>
-            )}
-          </div>
         </div>
       )}
 

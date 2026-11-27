@@ -46,6 +46,20 @@ export default defineConfig(({command}) => {
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
           }
+
+          const bundledFontsDir = path.resolve(__dirname, 'fonts');
+          const distFontsDir = path.join(distDir, 'studio-fonts');
+          if (fs.existsSync(distDir) && fs.existsSync(bundledFontsDir)) {
+            fs.mkdirSync(distFontsDir, {recursive: true});
+            for (const entry of fs.readdirSync(bundledFontsDir)) {
+              if (/\.(ttf|otf|woff2?)$/i.test(entry)) {
+                fs.copyFileSync(
+                  path.join(bundledFontsDir, entry),
+                  path.join(distFontsDir, entry)
+                );
+              }
+            }
+          }
         },
       },
     ],

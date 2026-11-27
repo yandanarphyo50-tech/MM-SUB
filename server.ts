@@ -846,6 +846,36 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '5mb' }));
 
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/studio-fonts/')) {
+      const origin = req.headers.origin;
+      const configured = (process.env.CORS_ALLOWED_ORIGIN || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const allowOrigin =
+        origin && (configured.length === 0 || configured.includes('*') || configured.includes(origin))
+          ? origin
+          : null;
+      if (allowOrigin) {
+        res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+        res.setHeader('Vary', 'Origin');
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Range');
+        res.setHeader(
+          'Access-Control-Expose-Headers',
+          'Content-Range,Content-Length,Accept-Ranges,Content-Disposition'
+        );
+      }
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
+
   if (fs.existsSync(BUNDLED_FONTS_DIR)) {
     app.use('/studio-fonts', express.static(BUNDLED_FONTS_DIR, { maxAge: '7d' }));
   }
@@ -867,9 +897,14 @@ async function startServer() {
     });
   });
 
-  app.get('/api/session-entry', (_req, res) => {
+  app.get('/api/session-entry', (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.redirect(302, '/');
+    const rawNext = typeof req.query.next === 'string' ? req.query.next.trim() : '';
+    const safeNext =
+      rawNext.startsWith('/') && !rawNext.startsWith('//') && !rawNext.startsWith('/api/')
+        ? rawNext
+        : '/';
+    res.redirect(302, safeNext);
   });
 
   // Self-destructing responder for any browser still polling legacy /dev-sw.js

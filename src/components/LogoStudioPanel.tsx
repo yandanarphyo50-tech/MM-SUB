@@ -1,6 +1,5 @@
 import React, { useRef } from 'react';
 import { Eye, EyeOff, ImagePlus, RotateCcw, Sparkles, Trash2, Type } from 'lucide-react';
-import { getSessionRefreshHref } from '../lib/api';
 import {
   DEFAULT_LOGO_CONFIG,
   DEFAULT_TEXT_LOGO_CONFIG,
@@ -23,7 +22,6 @@ interface LogoStudioPanelProps {
   fontName: string;
   isUploadingLogo: boolean;
   logoError: string | null;
-  cookieAuthNeeded?: boolean;
   onUploadLogoFile: (file: File) => void;
   onChangeLogoConfig: (next: LogoOverlayConfig) => void;
   onChangeTextLogoConfig: (next: TextLogoConfig) => void;
@@ -37,7 +35,6 @@ export const LogoStudioPanel: React.FC<LogoStudioPanelProps> = ({
   fontName,
   isUploadingLogo,
   logoError,
-  cookieAuthNeeded = false,
   onUploadLogoFile,
   onChangeLogoConfig,
   onChangeTextLogoConfig,
@@ -115,18 +112,8 @@ export const LogoStudioPanel: React.FC<LogoStudioPanelProps> = ({
       </div>
 
       {logoError && (
-        <div className="px-3 py-2 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-300 space-y-2">
+        <div className="px-3 py-2 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-300">
           <p>{logoError}</p>
-          {cookieAuthNeeded && typeof window !== 'undefined' && (
-            <a
-              href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-block px-3 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold"
-            >
-              Chrome Tab အသစ်တွင် ဖွင့်မည်
-            </a>
-          )}
         </div>
       )}
 

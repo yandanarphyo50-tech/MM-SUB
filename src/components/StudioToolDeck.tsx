@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Check,
   Clapperboard,
   Clock,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileDown,
   FileText,
   ImagePlus,
+  KeyRound,
   Languages,
   Maximize2,
   RotateCcw,
@@ -18,7 +21,12 @@ import {
   Type,
   X,
 } from 'lucide-react';
-import { getSessionRefreshHref, isEmbeddedIframe, isInAppBrowser, triggerBlobDownload } from '../lib/api';
+import {
+  isEmbeddedIframe,
+  isInAppBrowser,
+  triggerBlobDownload,
+} from '../lib/api';
+import { cleanGeminiApiKey } from '../lib/clientGemini';
 import {
   formatSecondsToClock,
   offsetSrtCues,
@@ -57,16 +65,13 @@ import { LogoStudioPanel } from './LogoStudioPanel';
 interface StudioToolDeckProps {
   hasVideo: boolean;
   hasLocalVideo?: boolean;
-  isUploading?: boolean;
-  uploadProgress?: number | null;
-  uploadError?: string | null;
-  cookieAuthNeeded?: boolean;
-  onRetryUpload?: () => void;
   openToolId: StudioToolId | null;
   onToggleTool: (toolId: StudioToolId) => void;
   onOpenTool: (toolId: StudioToolId) => void;
 
-  // Tool 1: AI Subtitle Generator
+  // Tool 1: AI Subtitle Generator (Direct Client-Side Gemini)
+  geminiApiKey: string;
+  onSaveGeminiApiKey: (key: string) => void;
   modeId: SubtitleModeId;
   onChangeMode: (mode: SubtitleModeId) => void;
   modelId: GeminiModelId;
@@ -83,6 +88,7 @@ interface StudioToolDeckProps {
   onChangeCustomPrompt: (val: string) => void;
   videoDuration: number;
   isGenerating: boolean;
+  generateProgressText?: string | null;
   generateError: string | null;
   onGenerateSubtitles: () => void;
 
@@ -141,6 +147,7 @@ interface StudioToolDeckProps {
 
   // Export & Download
   isRendering: boolean;
+  renderProgress?: number | null;
   isDownloadingMp4: boolean;
   downloadProgress?: number | null;
   renderError: string | null;
@@ -156,14 +163,11 @@ interface StudioToolDeckProps {
 export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
   hasVideo,
   hasLocalVideo = false,
-  isUploading = false,
-  uploadProgress = null,
-  uploadError = null,
-  cookieAuthNeeded = false,
-  onRetryUpload,
   openToolId,
   onToggleTool,
   onOpenTool,
+  geminiApiKey,
+  onSaveGeminiApiKey,
   modeId,
   onChangeMode,
   modelId,
@@ -180,6 +184,7 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
   onChangeCustomPrompt,
   videoDuration,
   isGenerating,
+  generateProgressText = null,
   generateError,
   onGenerateSubtitles,
   srtText,
@@ -226,6 +231,7 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
   videoFitMode,
   onChangeVideoFitMode,
   isRendering,
+  renderProgress = null,
   isDownloadingMp4,
   downloadProgress,
   renderError,
@@ -238,11 +244,33 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
   onPreviewRendered,
 }) => {
   const [editorTab, setEditorTab] = useState<'raw' | 'cues'>('raw');
+  const [apiKeyDraft, setApiKeyDraft] = useState<string>(geminiApiKey);
+  const [showApiKey, setShowApiKey] = useState<boolean>(false);
+  const [showApiKeyEditor, setShowApiKeyEditor] = useState<boolean>(!geminiApiKey);
+  const [apiKeySavedFlash, setApiKeySavedFlash] = useState<boolean>(false);
+
+  useEffect(() => {
+    setApiKeyDraft(geminiApiKey);
+    if (!geminiApiKey.trim()) {
+      setShowApiKeyEditor(true);
+    }
+  }, [geminiApiKey]);
+
+  const commitApiKeySave = (raw: string) => {
+    const clean = cleanGeminiApiKey(raw);
+    setApiKeyDraft(clean);
+    onSaveGeminiApiKey(clean);
+    if (clean) {
+      setShowApiKeyEditor(false);
+      setApiKeySavedFlash(true);
+      setTimeout(() => setApiKeySavedFlash(false), 2600);
+    }
+  };
 
   const activeModeShort =
     SUBTITLE_MODES.find((m) => m.id === modeId)?.shortLabel ?? 'Foreign -> Burmese';
   const activeModelLabel =
-    GEMINI_MODELS.find((m) => m.id === modelId)?.label ?? 'Gemini 4 Hydrogen';
+    GEMINI_MODELS.find((m) => m.id === modelId)?.label ?? 'Gemini 3.5 Flash Lite';
   const activePresetLabel =
     COLOR_PRESETS.find((p) => p.id === colorPresetId)?.label ?? 'Original';
   const activeFontSpec =
@@ -359,8 +387,8 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
     },
     {
       id: 'export',
-      label: 'Export MP4',
-      fullTitle: 'MP4 ထုတ်ယူမည် & Download',
+      label: 'Export Video',
+      fullTitle: 'ဗီဒီယို ထုတ်ယူမည် & Download',
       summary: renderResult
         ? `Ready · ${renderResult.filename}`
         : `${activeAspectSpec.shortMy} · ${activePresetLabel} · ${cues.length} cues`,
@@ -477,6 +505,106 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
         {/* TOOL 1: AI Subtitle Generator */}
         {openToolId === 'ai_subtitle' && (
           <div className="px-4 py-4 space-y-3 bg-[#090D16]/40">
+              {/* Gemini API Key Box (Saved locally in browser) */}
+              {geminiApiKey.trim() && !showApiKeyEditor ? (
+                <div className="px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/35 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0 text-xs text-emerald-300">
+                    <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">
+                      {apiKeySavedFlash
+                        ? 'Gemini API Key သိမ်းဆည်းပြီးပါပြီ ✓'
+                        : 'Gemini API Key သိမ်းဆည်းပြီး (Browser ထဲတွင်သာ)'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setApiKeyDraft(geminiApiKey);
+                      setShowApiKeyEditor(true);
+                    }}
+                    className="px-2 py-1 rounded bg-zinc-900 border border-zinc-700 hover:border-zinc-500 text-[11px] text-zinc-200 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ပြင်မည်
+                  </button>
+                </div>
+              ) : (
+                <div className="p-3 rounded-lg bg-[#090B0E] border border-amber-500/40 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-300">
+                      <KeyRound className="w-3.5 h-3.5" />
+                      <span>Gemini API Key (AI စာတန်းထိုးရန်)</span>
+                    </span>
+                    <a
+                      href="https://aistudio.google.com/apikey"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-sky-400 hover:text-sky-300 underline whitespace-nowrap"
+                    >
+                      API Key အခမဲ့ယူရန် →
+                    </a>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <div className="relative flex-1 min-w-0">
+                      <input
+                        type={showApiKey ? 'text' : 'password'}
+                        value={apiKeyDraft}
+                        onChange={(e) => setApiKeyDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            commitApiKeySave(apiKeyDraft);
+                          }
+                        }}
+                        placeholder="AIza... Gemini API Key ထည့်ပါ"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="w-full h-9 pl-2.5 pr-8 rounded-md bg-zinc-900 border border-zinc-800 font-mono text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-amber-500/70"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowApiKey((v) => !v)}
+                        aria-label={showApiKey ? 'Hide API Key' : 'Show API Key'}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200 cursor-pointer"
+                      >
+                        {showApiKey ? (
+                          <EyeOff className="w-3.5 h-3.5" />
+                        ) : (
+                          <Eye className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => commitApiKeySave(apiKeyDraft)}
+                      className="h-9 px-3 rounded-md bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-xs whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      Save
+                    </button>
+                    {geminiApiKey.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setApiKeyDraft('');
+                          onSaveGeminiApiKey('');
+                        }}
+                        title="Clear API Key"
+                        className="h-9 px-2.5 rounded-md bg-zinc-900 border border-zinc-800 hover:border-red-800 text-zinc-400 hover:text-red-300 text-xs whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        ဖျက်
+                      </button>
+                    )}
+                  </div>
+                  {apiKeyDraft.trim() && !cleanGeminiApiKey(apiKeyDraft).startsWith('AIza') && (
+                    <p className="text-[11px] text-amber-300 leading-relaxed">
+                      Google AI Studio Gemini API Key များသည် ပုံမှန်အားဖြင့် <span className="font-mono">AIza</span> ဖြင့် စတင်ပါသည်။
+                    </p>
+                  )}
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    API Key ကို သင့် Browser/ဖုန်းထဲတွင်သာ သိမ်းဆည်းထားပြီး Google Gemini REST API သို့ တိုက်ရိုက်ချိတ်ဆက်အလုပ်လုပ်ပါသည် (Backend Server မလိုပါ)။
+                  </p>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 gap-2.5">
                 <label className="flex flex-col gap-1">
                   <span className="text-xs font-medium text-zinc-400">ဘာသာစကား Mode</span>
@@ -620,45 +748,10 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
                 </label>
               </div>
 
-              {isUploading && (
-                <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/40 text-xs text-amber-200 flex items-center gap-2">
-                  <span className="w-3.5 h-3.5 rounded-full border-2 border-amber-400 border-t-transparent animate-spin shrink-0" />
-                  <span>
-                    ဗီဒီယိုဖိုင် Server သို့ တင်နေဆဲဖြစ်ပါသည်
-                    {uploadProgress !== null ? ` (${uploadProgress}%)` : '...'}
-                  </span>
-                </div>
-              )}
-
-              {uploadError && !isUploading && (
-                <div className="px-3 py-2 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-200 flex flex-wrap items-center justify-between gap-2">
-                  <span>{uploadError}</span>
-                  {onRetryUpload && hasLocalVideo && (
-                    <button
-                      type="button"
-                      onClick={onRetryUpload}
-                      className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold whitespace-nowrap cursor-pointer"
-                    >
-                      ပြန်တင်မည်
-                    </button>
-                  )}
-                </div>
-              )}
-
               {generateError && (
                 <div className="px-3 py-2 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-300 space-y-1.5">
                   <p>{generateError}</p>
                   <div className="flex flex-wrap items-center gap-2">
-                    {cookieAuthNeeded && typeof window !== 'undefined' && (
-                      <a
-                        href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold"
-                      >
-                        Chrome Tab အသစ်တွင် ဖွင့်မည်
-                      </a>
-                    )}
                     <a
                       href={CREATOR_FACEBOOK_URL}
                       target="_blank"
@@ -673,38 +766,34 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
 
               <button
                 type="button"
-                onClick={onGenerateSubtitles}
-                disabled={isUploading || isGenerating || isTranslatingSrt}
+                onClick={() => {
+                  const cleanDraft = cleanGeminiApiKey(apiKeyDraft);
+                  if (cleanDraft && cleanDraft !== cleanGeminiApiKey(geminiApiKey)) {
+                    commitApiKeySave(cleanDraft);
+                  }
+                  onGenerateSubtitles();
+                }}
+                disabled={isGenerating || isTranslatingSrt}
                 className={`w-full h-10 px-4 rounded-lg font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed ${
                   hasVideo || hasLocalVideo
                     ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950'
                     : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
                 }`}
               >
-                {isUploading ? (
+                {isGenerating ? (
                   <>
-                    <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-950 border-t-transparent animate-spin" />
-                    <span>
-                      ဗီဒီယိုတင်နေဆဲ {uploadProgress !== null ? `(${uploadProgress}%)` : '...'}
-                    </span>
-                  </>
-                ) : isGenerating ? (
-                  <>
-                    <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-950 border-t-transparent animate-spin" />
-                    <span>
-                      {translationScope === 'range'
-                        ? 'ရွေးချယ်ထားသောအပိုင်း ဘာသာပြန်နေသည်...'
-                        : 'ဗီဒီယိုတစ်ခုလုံး ဘာသာပြန်နေသည်...'}
+                    <span className="w-3.5 h-3.5 rounded-full border-2 border-zinc-950 border-t-transparent animate-spin shrink-0" />
+                    <span className="truncate">
+                      {generateProgressText ||
+                        (translationScope === 'range'
+                          ? 'ရွေးချယ်ထားသောအပိုင်း ဘာသာပြန်နေသည်...'
+                          : 'ဗီဒီယိုတစ်ခုလုံး ဘာသာပြန်နေသည်...')}
                     </span>
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>
-                      {!hasVideo && hasLocalVideo
-                        ? '၁။ ပြန်တင်ပြီး AI စာတန်းထိုးထုတ်မယ်'
-                        : '၁။ AI နဲ့ စာတန်းထိုးထုတ်မယ်'}
-                    </span>
+                    <span>၁။ AI နဲ့ စာတန်းထိုးထုတ်မယ်</span>
                   </>
                 )}
               </button>
@@ -804,7 +893,13 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
                 <button
                   type="button"
                   disabled={!canTranslateExisting}
-                  onClick={onTranslateExistingSrt}
+                  onClick={() => {
+                    const cleanDraft = cleanGeminiApiKey(apiKeyDraft);
+                    if (cleanDraft && cleanDraft !== cleanGeminiApiKey(geminiApiKey)) {
+                      commitApiKeySave(cleanDraft);
+                    }
+                    onTranslateExistingSrt();
+                  }}
                   className="w-full h-9 px-3 rounded-lg bg-amber-500/15 border border-amber-500/40 text-amber-300 hover:bg-amber-500/25 text-xs font-medium inline-flex items-center justify-center gap-1.5 disabled:opacity-45 cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   <Languages className="w-3.5 h-3.5" />
@@ -822,16 +917,6 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
                 <div className="px-3 py-2 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-300 space-y-1.5">
                   <p>{generateError}</p>
                   <div className="flex flex-wrap items-center gap-2">
-                    {cookieAuthNeeded && typeof window !== 'undefined' && (
-                      <a
-                        href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold"
-                      >
-                        Chrome Tab အသစ်တွင် ဖွင့်မည်
-                      </a>
-                    )}
                     <a
                       href={CREATOR_FACEBOOK_URL}
                       target="_blank"
@@ -1263,7 +1348,6 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
                 fontName={fontName}
                 isUploadingLogo={isUploadingLogo}
                 logoError={logoError}
-                cookieAuthNeeded={cookieAuthNeeded}
                 onUploadLogoFile={onUploadLogoFile}
                 onChangeLogoConfig={onChangeLogoConfig}
                 onChangeTextLogoConfig={onChangeTextLogoConfig}
@@ -1382,16 +1466,6 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
           <div className="px-3 py-2.5 rounded-lg bg-red-950/50 border border-red-900/70 text-xs text-red-300 whitespace-pre-wrap break-words max-h-48 overflow-y-auto space-y-1.5">
             <p>{renderError}</p>
             <div className="flex flex-wrap items-center gap-2">
-              {cookieAuthNeeded && typeof window !== 'undefined' && (
-                <a
-                  href={`${getSessionRefreshHref()}?ts=${Date.now()}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="px-2.5 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-semibold"
-                >
-                  Chrome Tab အသစ်တွင် ဖွင့်မည်
-                </a>
-              )}
               <a
                 href={CREATOR_FACEBOOK_URL}
                 target="_blank"
@@ -1407,23 +1481,22 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
         <button
           type="button"
           onClick={onRenderVideo}
-          disabled={(!hasVideo && !hasLocalVideo) || isUploading || isRendering}
+          disabled={(!hasVideo && !hasLocalVideo) || isRendering}
           className="w-full h-10 px-4 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-xs inline-flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed whitespace-nowrap"
         >
-          {isUploading ? (
+          {isRendering ? (
             <>
               <span className="w-4 h-4 rounded-full border-2 border-zinc-950 border-t-transparent animate-spin" />
-              <span>ဗီဒီယိုတင်နေဆဲ {uploadProgress !== null ? `(${uploadProgress}%)` : '...'}</span>
-            </>
-          ) : isRendering ? (
-            <>
-              <span className="w-4 h-4 rounded-full border-2 border-zinc-950 border-t-transparent animate-spin" />
-              <span>FFmpeg ဖြင့် Render ထုတ်နေသည်...</span>
+              <span>
+                {renderProgress !== null && renderProgress !== undefined
+                  ? `Browser ဖြင့် ဗီဒီယိုထုတ်နေသည် (${renderProgress}%)...`
+                  : 'Browser ဖြင့် ဗီဒီယိုထုတ်နေသည်...'}
+              </span>
             </>
           ) : (
             <>
               <Clapperboard className="w-4 h-4" />
-              <span>ကာလာပြောင်း &amp; ဗီဒီယိုထုတ်မယ် (Export MP4)</span>
+              <span>ကာလာပြောင်း &amp; ဗီဒီယိုထုတ်မယ် (Export Video)</span>
             </>
           )}
         </button>
@@ -1432,7 +1505,7 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
           <div className="pt-2 border-t border-zinc-800/80 space-y-2">
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs font-medium text-emerald-400 truncate">
-                Render ပြီးပါပြီ · {renderResult.filename}
+                Export ပြီးပါပြီ · {renderResult.filename}
               </p>
               <button
                 type="button"
@@ -1455,10 +1528,10 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
                     ? downloadProgress !== null && downloadProgress !== undefined
                       ? `Downloading ${downloadProgress}%`
                       : 'Preparing...'
-                    : 'Download MP4'}
+                    : 'Download Video'}
                 </span>
               </button>
-              {renderResult.srtUrl ? (
+              {renderResult.srtUrl || srtText.trim() ? (
                 <button
                   type="button"
                   onClick={onDownloadSrt}
@@ -1488,14 +1561,14 @@ export const StudioToolDeck: React.FC<StudioToolDeckProps> = ({
               )}
 
               <a
-                href={renderResult.blobUrl || `${renderResult.videoUrl}?download=1`}
+                href={renderResult.blobUrl || renderResult.videoUrl}
                 download={renderResult.filename}
                 target={isEmbeddedIframe() ? '_blank' : undefined}
                 rel={isEmbeddedIframe() ? 'noopener noreferrer' : undefined}
                 className="flex-1 min-w-[140px] h-9 px-3 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-200 text-xs font-medium inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
               >
                 <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
-                <span>{isEmbeddedIframe() ? 'Tab အသစ်တွင် ဖွင့်/ဒေါင်း' : 'Direct Save (MP4)'}</span>
+                <span>{isEmbeddedIframe() ? 'Tab အသစ်တွင် ဖွင့်/ဒေါင်း' : 'Direct Save Video'}</span>
               </a>
             </div>
 

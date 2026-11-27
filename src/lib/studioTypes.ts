@@ -105,7 +105,12 @@ export const SUBTITLE_MODES: SubtitleModeOption[] = [
   },
 ];
 
-export type GeminiModelId = 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+export type GeminiModelId =
+  | 'gemini-3.5-flash-lite'
+  | 'gemini-2.5-flash'
+  | 'gemini-2.5-pro'
+  | 'gemini-4-hydrogen'
+  | 'gemini-3.1-flash-lite';
 
 export interface GeminiModelOption {
   id: GeminiModelId;
@@ -115,14 +120,19 @@ export interface GeminiModelOption {
 
 export const GEMINI_MODELS: GeminiModelOption[] = [
   {
-    id: 'gemini-4-hydrogen',
-    label: 'Gemini 4 Hydrogen',
-    note: 'Fast & High Precision · Recommended',
+    id: 'gemini-3.5-flash-lite',
+    label: 'Gemini 3.5 Flash Lite',
+    note: 'Fast & Latest · Recommended',
   },
   {
-    id: 'gemini-3.1-flash-lite',
-    label: 'Gemini 3.1 Flash Lite',
-    note: 'Lite Alternative',
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash',
+    note: 'Standard Alternative',
+  },
+  {
+    id: 'gemini-2.5-pro',
+    label: 'Gemini 2.5 Pro',
+    note: 'Deep Reasoning & Lyrics',
   },
 ];
 

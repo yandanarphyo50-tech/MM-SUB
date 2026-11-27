@@ -39,23 +39,25 @@ async function clearCachesAndServiceWorkers(includeAllSw = false): Promise<boole
 
 let isCheckingVersion = false;
 
+async function fetchJsonVersion(url: string): Promise<string> {
+  const res = await fetch(url, {
+    method: 'GET',
+    cache: 'no-store',
+  });
+  if (!res.ok) return '';
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) return '';
+  const data = (await res.json()) as { version?: string };
+  return typeof data.version === 'string' ? data.version.trim() : '';
+}
+
 async function checkAndApplyVersionUpgrade(): Promise<void> {
   if (typeof window === 'undefined' || CLIENT_VERSION === 'dev' || isCheckingVersion) {
     return;
   }
   isCheckingVersion = true;
   try {
-    const res = await fetch(`/api/version?_=${Date.now()}`, {
-      method: 'GET',
-      credentials: 'include',
-      redirect: 'manual',
-      cache: 'no-store',
-    });
-    if (!res.ok) return;
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('application/json')) return;
-    const data = (await res.json()) as { version?: string };
-    const serverVer = typeof data.version === 'string' ? data.version.trim() : '';
+    const serverVer = await fetchJsonVersion(`/version.json?_=${Date.now()}`);
     if (!serverVer || serverVer === 'dev' || serverVer === CLIENT_VERSION) {
       return;
     }

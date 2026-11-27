@@ -71,8 +71,8 @@ const TOOL_ITEMS: Array<{
   },
   {
     id: 'export',
-    title: 'Export MP4 & Download',
-    desc: 'ပြင်ဆင်ထားသမျှ Color, Font, Animation, Logo နှင့် Video Size အားလုံးကို FFmpeg ဖြင့် HD MP4 ဗီဒီယိုအဖြစ် ပေါင်းစပ်ထုတ်ပေးပြီး Download / Gallery Save / .srt Download များ ပြုလုပ်နိုင်ပါသည်။',
+    title: 'Export Video & Download',
+    desc: 'ပြင်ဆင်ထားသမျှ Color, Font, Animation, Logo နှင့် Video Size အားလုံးကို Browser ထဲတွင် တိုက်ရိုက် HD Video အဖြစ် ပေါင်းစပ်ထုတ်ပေးပြီး Download / Gallery Save / .srt Download များ ပြုလုပ်နိုင်ပါသည်။',
     icon: <Clapperboard className="w-4 h-4 text-amber-500" />,
   },
 ];

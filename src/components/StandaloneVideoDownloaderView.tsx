@@ -19,7 +19,6 @@ interface StandaloneVideoDownloaderViewProps {
   isInspecting: boolean;
   isDownloadingLink: boolean;
   downloadError: string | null;
-  cookieAuthNeeded: boolean;
   downloadedItems: DownloadedVideoItem[];
   savingItemId: string | null;
   savingProgress: number | null;
@@ -32,7 +31,6 @@ interface StandaloneVideoDownloaderViewProps {
   onUseDownloadedInStudio: (item: DownloadedVideoItem) => void;
   onBackHome: () => void;
   onOpenStudio: () => void;
-  cookieBanner?: React.ReactNode;
   inAppBrowserBanner?: React.ReactNode;
 }
 
@@ -45,7 +43,6 @@ export const StandaloneVideoDownloaderView: React.FC<StandaloneVideoDownloaderVi
   isInspecting,
   isDownloadingLink,
   downloadError,
-  cookieAuthNeeded,
   downloadedItems,
   savingItemId,
   savingProgress,
@@ -58,7 +55,6 @@ export const StandaloneVideoDownloaderView: React.FC<StandaloneVideoDownloaderVi
   onUseDownloadedInStudio,
   onBackHome,
   onOpenStudio,
-  cookieBanner,
   inAppBrowserBanner,
 }) => {
   return (
@@ -113,7 +109,6 @@ export const StandaloneVideoDownloaderView: React.FC<StandaloneVideoDownloaderVi
 
       {/* Main Standalone Downloader Workspace */}
       <main className="flex-1 max-w-2xl w-full mx-auto px-3 sm:px-6 py-5 sm:py-8 space-y-4">
-        {cookieBanner}
         {inAppBrowserBanner}
         <StandaloneInstallStrip />
 
@@ -157,7 +152,6 @@ export const StandaloneVideoDownloaderView: React.FC<StandaloneVideoDownloaderVi
               isInspecting={isInspecting}
               isDownloadingLink={isDownloadingLink}
               downloadError={downloadError}
-              cookieAuthNeeded={cookieAuthNeeded}
               downloadedItems={downloadedItems}
               savingItemId={savingItemId}
               savingProgress={savingProgress}
